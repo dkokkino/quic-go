@@ -546,6 +546,7 @@ func ackedBytesInFlight(ackedPackets []packetWithPacketNumber) protocol.ByteCoun
 	return acked
 }
 
+
 func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime monotime.Time) {
 	var maxPacketReordering protocol.PacketNumber
 	var maxTimeReordering time.Duration
