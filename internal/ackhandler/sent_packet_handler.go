@@ -591,7 +591,11 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime mon
 				packetReordering := h.appDataPackets.history.Difference(ack.LargestAcked(), pn)
 				slh.OnSpuriousLossDetected(pn, packetReordering)
 			}
+			spuriousLosses = append(spuriousLosses, pn)
 		}
+	}
+	for _, pn := range spuriousLosses {
+		h.lostPackets.Delete(pn)
 	}
 }
 
