@@ -600,8 +600,8 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime mon
 	}
 	timeReorderingFraction := float64(maxTimeReordering) / float64(h.rttStats.SmoothedRTT())
 	if maxPacketReordering > h.packetThreshold || timeReorderingFraction > h.timeThreshold {
-		h.packetThreshold = maxPacketReordering
-		h.timeThreshold = timeReorderingFraction
+		h.packetThreshold = max(h.packetThreshold, maxPacketReordering)
+		h.timeThreshold = max(h.timeThreshold, timeReorderingFraction)
 	}
 }
 
@@ -870,8 +870,6 @@ func (h *sentPacketHandler) detectLostPathProbes(now monotime.Time) {
 func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protocol.EncryptionLevel) {
 	pnSpace := h.getPacketNumberSpace(encLevel)
 	pnSpace.lossTime = 0
-	packetReorderThreshold := h.packetThreshold
-
 	maxRTT := float64(max(h.rttStats.LatestRTT(), h.rttStats.SmoothedRTT()))
 	lossDelay := time.Duration(h.timeThreshold * maxRTT)
 
