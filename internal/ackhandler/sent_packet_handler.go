@@ -18,9 +18,9 @@ import (
 const (
 	// Maximum reordering in time space before time based loss detection considers a packet lost.
 	// Specified as an RTT multiplier.
-	timeThreshold = 9.0 / 8
+	defaultTimeThreshold = 9.0 / 8
 	// Maximum reordering in packets before packet threshold loss detection considers a packet lost.
-	packetThreshold = 3
+	defaultPacketThreshold = 3
 	// Before validating the client's address, the server won't send more than 3x bytes than it received.
 	amplificationFactor = 3
 	// We use Retry packets to derive an RTT estimate. Make sure we don't set the RTT to a super low value yet.
@@ -88,6 +88,9 @@ type sentPacketHandler struct {
 	ackedPackets []packetWithPacketNumber // to avoid allocations in detectAndRemoveAckedPackets
 
 	bytesInFlight protocol.ByteCount
+
+	timeThreshold   float64
+	packetThreshold protocol.PacketNumber
 
 	congestion congestion.SendAlgorithmWithDebugInfos
 	// Keep the built-in default path on fresh controller instances, even if a
@@ -164,6 +167,8 @@ func NewSentPacketHandler(
 		handshakePackets:               newPacketNumberSpace(0, false),
 		appDataPackets:                 newPacketNumberSpace(0, true),
 		lostPackets:                    *newLostPacketTracker(64),
+		timeThreshold:                  defaultTimeThreshold,
+		packetThreshold:                defaultPacketThreshold,
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     cc,
@@ -591,11 +596,12 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime mon
 				packetReordering := h.appDataPackets.history.Difference(ack.LargestAcked(), pn)
 				slh.OnSpuriousLossDetected(pn, packetReordering)
 			}
-			spuriousLosses = append(spuriousLosses, pn)
 		}
 	}
-	for _, pn := range spuriousLosses {
-		h.lostPackets.Delete(pn)
+	timeReorderingFraction := float64(maxTimeReordering) / float64(h.rttStats.SmoothedRTT())
+	if maxPacketReordering > h.packetThreshold || timeReorderingFraction > h.timeThreshold {
+		h.packetThreshold = maxPacketReordering
+		h.timeThreshold = timeReorderingFraction
 	}
 }
 
@@ -864,10 +870,10 @@ func (h *sentPacketHandler) detectLostPathProbes(now monotime.Time) {
 func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protocol.EncryptionLevel) {
 	pnSpace := h.getPacketNumberSpace(encLevel)
 	pnSpace.lossTime = 0
-	packetReorderThreshold := protocol.PacketNumber(packetThreshold)
+	packetReorderThreshold := h.packetThreshold
 
 	maxRTT := float64(max(h.rttStats.LatestRTT(), h.rttStats.SmoothedRTT()))
-	lossDelay := time.Duration(timeThreshold * maxRTT)
+	lossDelay := time.Duration(h.timeThreshold * maxRTT)
 
 	// Minimum time of granularity before packets are deemed lost.
 	lossDelay = max(lossDelay, protocol.TimerGranularity)
