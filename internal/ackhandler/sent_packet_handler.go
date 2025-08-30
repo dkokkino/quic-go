@@ -904,7 +904,7 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 					})
 				}
 			}
-		} else if pnSpace.history.Difference(pnSpace.largestAcked, pn) >= packetReorderThreshold {
+		} else if pnSpace.history.Difference(pnSpace.largestAcked, pn) >= h.packetThreshold {
 			packetLost = true
 			if !p.isPathProbePacket && p.IsAckEliciting() {
 				if h.logger.Debug() {
