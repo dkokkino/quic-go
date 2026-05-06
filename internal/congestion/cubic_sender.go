@@ -2,6 +2,7 @@ package congestion
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -124,12 +125,12 @@ func newCubicSender(
 }
 
 // TimeUntilSend returns when the next packet should be sent.
-func (c *cubicSender) TimeUntilSend(_ protocol.ByteCount) monotime.Time {
-	return c.pacer.TimeUntilSend()
+func (c *cubicSender) TimeUntilSend(_ protocol.ByteCount) time.Time {
+	return c.pacer.TimeUntilSend().ToTime()
 }
 
-func (c *cubicSender) HasPacingBudget(now monotime.Time) bool {
-	return c.pacer.Budget(now) >= c.maxDatagramSize
+func (c *cubicSender) HasPacingBudget(now time.Time) bool {
+	return c.pacer.Budget(monotime.FromTime(now)) >= c.maxDatagramSize
 }
 
 func (c *cubicSender) maxCongestionWindow() protocol.ByteCount {
@@ -141,13 +142,13 @@ func (c *cubicSender) minCongestionWindow() protocol.ByteCount {
 }
 
 func (c *cubicSender) OnPacketSent(
-	sentTime monotime.Time,
+	sentTime time.Time,
 	_ protocol.ByteCount,
 	packetNumber protocol.PacketNumber,
 	bytes protocol.ByteCount,
 	isRetransmittable bool,
 ) {
-	c.pacer.SentPacket(sentTime, bytes)
+	c.pacer.SentPacket(monotime.FromTime(sentTime), bytes)
 	if !isRetransmittable {
 		return
 	}
@@ -184,13 +185,13 @@ func (c *cubicSender) OnPacketAcked(
 	ackedPacketNumber protocol.PacketNumber,
 	ackedBytes protocol.ByteCount,
 	priorInFlight protocol.ByteCount,
-	eventTime monotime.Time,
+	eventTime time.Time,
 ) {
 	c.largestAckedPacketNumber = max(ackedPacketNumber, c.largestAckedPacketNumber)
 	if c.InRecovery() {
 		return
 	}
-	c.maybeIncreaseCwnd(ackedPacketNumber, ackedBytes, priorInFlight, eventTime)
+	c.maybeIncreaseCwnd(ackedPacketNumber, ackedBytes, priorInFlight, monotime.FromTime(eventTime))
 	if c.InSlowStart() {
 		c.hybridSlowStart.OnPacketAcked(ackedPacketNumber)
 	}

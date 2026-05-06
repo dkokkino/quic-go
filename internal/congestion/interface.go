@@ -1,19 +1,21 @@
 package congestion
 
 import (
-	"github.com/quic-go/quic-go/internal/monotime"
+	"time"
+
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/utils"
 )
 
-// A SendAlgorithm performs congestion control
+// A SendAlgorithm performs congestion control.
+// All timestamps use stdlib time.Time so implementations can live outside this module.
 type SendAlgorithm interface {
-	TimeUntilSend(bytesInFlight protocol.ByteCount) monotime.Time
-	HasPacingBudget(now monotime.Time) bool
-	OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool)
+	TimeUntilSend(bytesInFlight protocol.ByteCount) time.Time
+	HasPacingBudget(now time.Time) bool
+	OnPacketSent(sentTime time.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool)
 	CanSend(bytesInFlight protocol.ByteCount) bool
 	MaybeExitSlowStart()
-	OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime monotime.Time)
+	OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime time.Time)
 	OnCongestionEvent(number protocol.PacketNumber, lostBytes protocol.ByteCount, priorInFlight protocol.ByteCount)
 	SetMaxDatagramSize(protocol.ByteCount)
 }
@@ -34,9 +36,10 @@ type SendAlgorithmWithDebugInfos interface {
 
 // AckEventHandler is implemented by congestion controllers that need ACK-event
 // boundaries instead of only per-packet callbacks.
+// Uses stdlib time.Time so implementations can live outside the quic-go module.
 type AckEventHandler interface {
-	OnAckEventStart(eventTime monotime.Time, bytesInFlight protocol.ByteCount)
-	OnAckEventEnd(eventTime monotime.Time)
+	OnAckEventStart(eventTime time.Time, bytesInFlight protocol.ByteCount)
+	OnAckEventEnd(eventTime time.Time)
 }
 
 // LossDetectionHandler is implemented by congestion controllers that need a
@@ -47,12 +50,13 @@ type LossDetectionHandler interface {
 
 // ECNFeedbackHandler is implemented by congestion controllers that consume
 // QUIC ACK-frame ECN counters directly.
+// Uses stdlib time.Time so implementations can live outside the quic-go module.
 type ECNFeedbackHandler interface {
 	OnECNFeedback(
 		ackedBytes protocol.ByteCount,
 		ect0Total, ect1Total, ceTotal int64,
 		priorInFlight protocol.ByteCount,
-		eventTime monotime.Time,
+		eventTime time.Time,
 	)
 }
 

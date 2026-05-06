@@ -312,7 +312,7 @@ func (h *sentPacketHandler) SentPacket(
 			h.numProbesToSend--
 		}
 	}
-	h.congestion.OnPacketSent(t, h.bytesInFlight, pn, size, isAckEliciting)
+	h.congestion.OnPacketSent(t.ToTime(), h.bytesInFlight, pn, size, isAckEliciting)
 
 	if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil {
 		h.ecnTracker.SentPacket(pn, ecn)
@@ -452,7 +452,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 				int64(ack.ECT1),
 				int64(ack.ECNCE),
 				priorInFlight,
-				rcvTime,
+				rcvTime.ToTime(),
 			)
 		}
 	}
@@ -467,12 +467,12 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		h.detectLostPathProbes(rcvTime)
 	}
 	if ackEventStart, ok := h.congestion.(congestion.AckEventHandler); ok {
-		ackEventStart.OnAckEventStart(rcvTime, h.bytesInFlight)
+		ackEventStart.OnAckEventStart(rcvTime.ToTime(), h.bytesInFlight)
 	}
 	var acked1RTTPacket bool
 	for _, p := range ackedPackets {
 		if p.includedInBytesInFlight {
-			h.congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime)
+			h.congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime.ToTime())
 		}
 		if p.EncryptionLevel == protocol.Encryption1RTT {
 			acked1RTTPacket = true
@@ -483,7 +483,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		}
 	}
 	if ackEvents, ok := h.congestion.(congestion.AckEventHandler); ok {
-		ackEvents.OnAckEventEnd(rcvTime)
+		ackEvents.OnAckEventEnd(rcvTime.ToTime())
 	}
 
 	// detect spurious losses for application data packets, if the ACK was not reordered
@@ -1082,14 +1082,14 @@ func (h *sentPacketHandler) SendMode(now monotime.Time) SendMode {
 		}
 		return SendAck
 	}
-	if !h.congestion.HasPacingBudget(now) {
+	if !h.congestion.HasPacingBudget(now.ToTime()) {
 		return SendPacingLimited
 	}
 	return SendAny
 }
 
 func (h *sentPacketHandler) TimeUntilSend() monotime.Time {
-	return h.congestion.TimeUntilSend(h.bytesInFlight)
+	return monotime.FromTime(h.congestion.TimeUntilSend(h.bytesInFlight))
 }
 
 func (h *sentPacketHandler) SetMaxDatagramSize(s protocol.ByteCount) {

@@ -1090,12 +1090,12 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	for i := range 5 {
 		gomock.InOrder(
 			cong.EXPECT().CanSend(bytesInFlight).Return(true),
-			cong.EXPECT().HasPacingBudget(now).Return(true),
+			cong.EXPECT().HasPacingBudget(now.ToTime()).Return(true),
 		)
 		require.Equal(t, SendAny, sph.SendMode(now))
 		pn := sph.PopPacketNumber(protocol.EncryptionInitial)
 		bytesInFlight += 1000
-		cong.EXPECT().OnPacketSent(now, bytesInFlight, pn, protocol.ByteCount(1000), true)
+		cong.EXPECT().OnPacketSent(now.ToTime(), bytesInFlight, pn, protocol.ByteCount(1000), true)
 		sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.EncryptionInitial, protocol.ECNNon, 1000, i == 1, false)
 		pns = append(pns, pn)
 		sendTimes = append(sendTimes, now)
@@ -1106,12 +1106,12 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	now = now.Add(100 * time.Millisecond)
 	gomock.InOrder(
 		cong.EXPECT().CanSend(bytesInFlight).Return(true),
-		cong.EXPECT().HasPacingBudget(now).Return(false),
+		cong.EXPECT().HasPacingBudget(now.ToTime()).Return(false),
 	)
 	require.Equal(t, SendPacingLimited, sph.SendMode(now))
 	// the connection would call TimeUntilSend, to find out when a new packet can be sent again
 	pacingDeadline := now.Add(500 * time.Millisecond)
-	cong.EXPECT().TimeUntilSend(bytesInFlight).Return(pacingDeadline)
+	cong.EXPECT().TimeUntilSend(bytesInFlight).Return(pacingDeadline.ToTime())
 	require.Equal(t, pacingDeadline, sph.TimeUntilSend())
 
 	// try to send another packet, but now we're congestion limited
@@ -1126,8 +1126,8 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	gomock.InOrder(
 		cong.EXPECT().MaybeExitSlowStart(),
 		cong.EXPECT().OnCongestionEvent(pns[0], protocol.ByteCount(1000), protocol.ByteCount(5000)),
-		cong.EXPECT().OnPacketAcked(pns[2], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
-		cong.EXPECT().OnPacketAcked(pns[3], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
+		cong.EXPECT().OnPacketAcked(pns[2], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime.ToTime()),
+		cong.EXPECT().OnPacketAcked(pns[3], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime.ToTime()),
 	)
 	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[2], pns[3])}, protocol.EncryptionInitial, ackTime)
 	require.NoError(t, err)
@@ -1148,7 +1148,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	// send another packet to check that bytes_in_flight was correctly adjusted
 	now = timeout.Add(100 * time.Millisecond)
 	pn := sph.PopPacketNumber(protocol.EncryptionInitial)
-	cong.EXPECT().OnPacketSent(now, protocol.ByteCount(2000), pn, protocol.ByteCount(1000), true)
+	cong.EXPECT().OnPacketSent(now.ToTime(), protocol.ByteCount(2000), pn, protocol.ByteCount(1000), true)
 	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.EncryptionInitial, protocol.ECNNon, 1000, false, false)
 }
 

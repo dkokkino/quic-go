@@ -15,9 +15,9 @@ type hookTrackingCongestion struct {
 	maxDatagramSize protocol.ByteCount
 	rttStats        *utils.RTTStats
 
-	ackStartTimes         []monotime.Time
+	ackStartTimes         []time.Time
 	ackStartBytesInFlight []protocol.ByteCount
-	ackEndTimes           []monotime.Time
+	ackEndTimes           []time.Time
 	lossDetectionStarts   int
 	ecnAckedBytes         []protocol.ByteCount
 	ecnECT0               []int64
@@ -32,13 +32,13 @@ type hookTrackingCongestion struct {
 	packetThreshold       protocol.PacketNumber
 }
 
-func (*hookTrackingCongestion) TimeUntilSend(protocol.ByteCount) monotime.Time { return 0 }
-func (*hookTrackingCongestion) HasPacingBudget(monotime.Time) bool             { return true }
-func (*hookTrackingCongestion) OnPacketSent(monotime.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
+func (*hookTrackingCongestion) TimeUntilSend(protocol.ByteCount) time.Time { return time.Time{} }
+func (*hookTrackingCongestion) HasPacingBudget(time.Time) bool             { return true }
+func (*hookTrackingCongestion) OnPacketSent(time.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
 }
 func (*hookTrackingCongestion) CanSend(protocol.ByteCount) bool { return true }
 func (*hookTrackingCongestion) MaybeExitSlowStart()             {}
-func (*hookTrackingCongestion) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, monotime.Time) {
+func (*hookTrackingCongestion) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, time.Time) {
 }
 func (*hookTrackingCongestion) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
 }
@@ -51,11 +51,11 @@ func (h *hookTrackingCongestion) GetCongestionWindow() protocol.ByteCount {
 	return h.maxDatagramSize * 10
 }
 func (h *hookTrackingCongestion) SetRTTStats(rttStats *utils.RTTStats) { h.rttStats = rttStats }
-func (h *hookTrackingCongestion) OnAckEventStart(eventTime monotime.Time, bytesInFlight protocol.ByteCount) {
+func (h *hookTrackingCongestion) OnAckEventStart(eventTime time.Time, bytesInFlight protocol.ByteCount) {
 	h.ackStartTimes = append(h.ackStartTimes, eventTime)
 	h.ackStartBytesInFlight = append(h.ackStartBytesInFlight, bytesInFlight)
 }
-func (h *hookTrackingCongestion) OnAckEventEnd(eventTime monotime.Time) {
+func (h *hookTrackingCongestion) OnAckEventEnd(eventTime time.Time) {
 	h.ackEndTimes = append(h.ackEndTimes, eventTime)
 }
 func (h *hookTrackingCongestion) OnLossDetectionStart() { h.lossDetectionStarts++ }
@@ -63,7 +63,7 @@ func (h *hookTrackingCongestion) OnECNFeedback(
 	ackedBytes protocol.ByteCount,
 	ect0Total, ect1Total, ceTotal int64,
 	priorInFlight protocol.ByteCount,
-	_ monotime.Time,
+	_ time.Time,
 ) {
 	h.ecnAckedBytes = append(h.ecnAckedBytes, ackedBytes)
 	h.ecnECT0 = append(h.ecnECT0, ect0Total)
@@ -96,13 +96,13 @@ type fallbackOnlyCongestion struct {
 	maxDatagramSize protocol.ByteCount
 }
 
-func (*fallbackOnlyCongestion) TimeUntilSend(protocol.ByteCount) monotime.Time { return 0 }
-func (*fallbackOnlyCongestion) HasPacingBudget(monotime.Time) bool             { return true }
-func (*fallbackOnlyCongestion) OnPacketSent(monotime.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
+func (*fallbackOnlyCongestion) TimeUntilSend(protocol.ByteCount) time.Time { return time.Time{} }
+func (*fallbackOnlyCongestion) HasPacingBudget(time.Time) bool             { return true }
+func (*fallbackOnlyCongestion) OnPacketSent(time.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
 }
 func (*fallbackOnlyCongestion) CanSend(protocol.ByteCount) bool { return true }
 func (*fallbackOnlyCongestion) MaybeExitSlowStart()             {}
-func (*fallbackOnlyCongestion) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, monotime.Time) {
+func (*fallbackOnlyCongestion) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, time.Time) {
 }
 func (*fallbackOnlyCongestion) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
 }

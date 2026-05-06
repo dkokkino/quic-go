@@ -61,7 +61,7 @@ func newTestCubicSender(cubic bool) *testCubicSender {
 func (s *testCubicSender) SendAvailableSendWindowLen(packetLength protocol.ByteCount) int {
 	var packetsSent int
 	for s.sender.CanSend(s.bytesInFlight) {
-		s.sender.OnPacketSent(s.clock.Now(), s.bytesInFlight, s.packetNumber, packetLength, true)
+		s.sender.OnPacketSent(s.clock.Now().ToTime(), s.bytesInFlight, s.packetNumber, packetLength, true)
 		s.packetNumber++
 		packetsSent++
 		s.bytesInFlight += packetLength
@@ -74,7 +74,7 @@ func (s *testCubicSender) AckNPackets(n int) {
 	s.sender.MaybeExitSlowStart()
 	for range n {
 		s.ackedPacketNumber++
-		s.sender.OnPacketAcked(s.ackedPacketNumber, maxDatagramSize, s.bytesInFlight, s.clock.Now())
+		s.sender.OnPacketAcked(s.ackedPacketNumber, maxDatagramSize, s.bytesInFlight, s.clock.Now().ToTime())
 	}
 	s.bytesInFlight -= protocol.ByteCount(n) * maxDatagramSize
 	s.clock.Advance(time.Millisecond)
@@ -133,7 +133,7 @@ func TestCubicSenderPacing(t *testing.T) {
 	// Check that we can't send immediately due to pacing
 	delay := sender.sender.TimeUntilSend(sender.bytesInFlight)
 	require.NotZero(t, delay)
-	require.Less(t, delay.Sub(monotime.Time(*sender.clock)), time.Hour)
+	require.Less(t, delay.Sub(sender.clock.Now().ToTime()), time.Hour)
 }
 
 func TestCubicSenderApplicationLimitedSlowStart(t *testing.T) {
@@ -487,7 +487,7 @@ func TestCubicSenderSlowStartsUpToMaximumCongestionWindow(t *testing.T) {
 
 	for i := 1; i < protocol.MaxCongestionWindowPackets; i++ {
 		sender.MaybeExitSlowStart()
-		sender.OnPacketAcked(protocol.PacketNumber(i), 1350, sender.GetCongestionWindow(), clock.Now())
+		sender.OnPacketAcked(protocol.PacketNumber(i), 1350, sender.GetCongestionWindow(), clock.Now().ToTime())
 	}
 	require.Equal(t, initialMaxCongestionWindow, sender.GetCongestionWindow())
 }
@@ -514,7 +514,7 @@ func TestCubicSenderSlowStartsPacketSizeIncrease(t *testing.T) {
 	const packetSize = initialMaxDatagramSize + 100
 	sender.SetMaxDatagramSize(packetSize)
 	for i := 1; i < protocol.MaxCongestionWindowPackets; i++ {
-		sender.OnPacketAcked(protocol.PacketNumber(i), packetSize, sender.GetCongestionWindow(), clock.Now())
+		sender.OnPacketAcked(protocol.PacketNumber(i), packetSize, sender.GetCongestionWindow(), clock.Now().ToTime())
 	}
 	const maxCwnd = protocol.MaxCongestionWindowPackets * packetSize
 	require.True(t, sender.GetCongestionWindow() > maxCwnd)
