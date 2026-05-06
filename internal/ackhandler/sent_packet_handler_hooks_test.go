@@ -42,7 +42,6 @@ func (*hookTrackingCongestion) OnPacketAcked(protocol.PacketNumber, protocol.Byt
 }
 func (*hookTrackingCongestion) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
 }
-func (*hookTrackingCongestion) OnRetransmissionTimeout(bool) {}
 func (h *hookTrackingCongestion) SetMaxDatagramSize(s protocol.ByteCount) {
 	h.maxDatagramSize = s
 }
@@ -107,7 +106,6 @@ func (*fallbackOnlyCongestion) OnPacketAcked(protocol.PacketNumber, protocol.Byt
 }
 func (*fallbackOnlyCongestion) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
 }
-func (*fallbackOnlyCongestion) OnRetransmissionTimeout(bool) {}
 func (f *fallbackOnlyCongestion) SetMaxDatagramSize(s protocol.ByteCount) {
 	f.maxDatagramSize = s
 }

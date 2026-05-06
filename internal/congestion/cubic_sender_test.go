@@ -214,11 +214,6 @@ func TestCubicSenderSlowStartPacketLoss(t *testing.T) {
 	sender.AckNPackets(1)
 	expectedSendWindow += maxDatagramSize
 	require.Equal(t, expectedSendWindow, sender.sender.GetCongestionWindow())
-
-	// Now RTO and ensure slow start gets reset.
-	require.True(t, sender.sender.hybridSlowStart.Started())
-	sender.sender.OnRetransmissionTimeout(true)
-	require.False(t, sender.sender.hybridSlowStart.Started())
 }
 
 func TestCubicSenderSlowStartPacketLossPRR(t *testing.T) {
@@ -322,19 +317,6 @@ func TestCubicSenderSlowStartBurstPacketLossPRR(t *testing.T) {
 		sender.AckNPackets(1)
 		require.Equal(t, 1, sender.SendAvailableSendWindow())
 	}
-}
-
-func TestCubicSenderRTOCongestionWindow(t *testing.T) {
-	sender := newTestCubicSender(false)
-
-	require.Equal(t, defaultWindowTCP, sender.sender.GetCongestionWindow())
-	require.Equal(t, protocol.MaxByteCount, sender.sender.slowStartThreshold)
-
-	// Expect the window to decrease to the minimum once the RTO fires
-	// and slow start threshold to be set to 1/2 of the CWND.
-	sender.sender.OnRetransmissionTimeout(true)
-	require.Equal(t, 2*maxDatagramSize, sender.sender.GetCongestionWindow())
-	require.Equal(t, 5*maxDatagramSize, sender.sender.slowStartThreshold)
 }
 
 func TestCubicSenderTCPCubicResetEpochOnQuiescence(t *testing.T) {

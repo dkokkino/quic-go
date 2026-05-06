@@ -284,18 +284,6 @@ func (c *cubicSender) BandwidthEstimate() Bandwidth {
 	return BandwidthFromDelta(c.GetCongestionWindow(), srtt)
 }
 
-// OnRetransmissionTimeout is called on an retransmission timeout
-func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
-	c.largestSentAtLastCutback = protocol.InvalidPacketNumber
-	if !packetsRetransmitted {
-		return
-	}
-	c.hybridSlowStart.Restart()
-	c.cubic.Reset()
-	c.slowStartThreshold = c.congestionWindow / 2
-	c.congestionWindow = c.minCongestionWindow()
-}
-
 // OnConnectionMigration is called when the connection is migrated (?)
 func (c *cubicSender) OnConnectionMigration() {
 	c.hybridSlowStart.Restart()

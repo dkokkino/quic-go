@@ -375,42 +375,6 @@ func (c *MockSendAlgorithmWithDebugInfosOnPacketSentCall) DoAndReturn(f func(mon
 	return c
 }
 
-// OnRetransmissionTimeout mocks base method.
-func (m *MockSendAlgorithmWithDebugInfos) OnRetransmissionTimeout(packetsRetransmitted bool) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnRetransmissionTimeout", packetsRetransmitted)
-}
-
-// OnRetransmissionTimeout indicates an expected call of OnRetransmissionTimeout.
-func (mr *MockSendAlgorithmWithDebugInfosMockRecorder) OnRetransmissionTimeout(packetsRetransmitted any) *MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnRetransmissionTimeout", reflect.TypeOf((*MockSendAlgorithmWithDebugInfos)(nil).OnRetransmissionTimeout), packetsRetransmitted)
-	return &MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall{Call: call}
-}
-
-// MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall wrap *gomock.Call
-type MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall) Return() *MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall {
-	c.Call = c.Call.Return()
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall) Do(f func(bool)) *MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall) DoAndReturn(f func(bool)) *MockSendAlgorithmWithDebugInfosOnRetransmissionTimeoutCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
 // SetMaxDatagramSize mocks base method.
 func (m *MockSendAlgorithmWithDebugInfos) SetMaxDatagramSize(arg0 protocol.ByteCount) {
 	m.ctrl.T.Helper()
