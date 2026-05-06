@@ -146,7 +146,12 @@ func NewSentPacketHandler(
 		)
 		usesDefault = true
 	} else {
-		if setter, ok := cc.(congestion.SendAlgorithmWithRTTStats); ok {
+		// Check the public RTTStatsReader hook first (for external implementations
+		// that cannot import *utils.RTTStats), then fall back to the internal hook.
+		type externalRTTStatsSetter interface{ SetRTTStats(utils.RTTStatsReader) }
+		if setter, ok := cc.(externalRTTStatsSetter); ok {
+			setter.SetRTTStats(rttStats)
+		} else if setter, ok := cc.(congestion.SendAlgorithmWithRTTStats); ok {
 			setter.SetRTTStats(rttStats)
 		}
 		cc.SetMaxDatagramSize(initialMaxDatagramSize)

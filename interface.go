@@ -11,16 +11,64 @@ import (
 	"github.com/quic-go/quic-go/internal/congestion"
 	"github.com/quic-go/quic-go/internal/handshake"
 	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/qlogwriter"
 )
+
+// ByteCount is the number of bytes, used for congestion control and flow control.
+type ByteCount = protocol.ByteCount
+
+// PacketNumber is a QUIC packet number.
+type PacketNumber = protocol.PacketNumber
+
+// RTTStatsReader provides read access to the connection's RTT estimates.
+// Congestion controllers that implement SetRTTStats should accept this
+// interface rather than *utils.RTTStats to avoid importing internal packages.
+type RTTStatsReader = utils.RTTStatsReader
 
 // CongestionController is the interface that congestion control algorithms must implement
 // to be used with Config.Congestion. Supply a factory function returning this type to
 // replace the default NewReno algorithm on a per-connection basis.
 //
-// All method signatures reference internal types; implementations must live within the
-// quic-go module (i.e. in internal/congestion) until those types are re-exported.
+// The mandatory interface requires only the signals every algorithm must handle.
+// Optional behaviour is expressed via the hook interfaces below — implement only
+// the ones your algorithm needs. All timestamps use stdlib time.Time.
 type CongestionController = congestion.SendAlgorithmWithDebugInfos
+
+// AckEventHandler is an optional hook for congestion controllers that need
+// ACK-event boundaries. OnAckEventStart fires after loss detection and before
+// per-packet ACK callbacks; OnAckEventEnd fires after all packets in the ACK
+// frame have been processed.
+type AckEventHandler = congestion.AckEventHandler
+
+// LossDetectionHandler is an optional hook called before each loss detection
+// pass, allowing the controller to snapshot state before packets are declared lost.
+type LossDetectionHandler = congestion.LossDetectionHandler
+
+// ECNFeedbackHandler is an optional hook for controllers that consume raw ECN
+// counters (ECT0, ECT1, CE) from QUIC ACK frames directly.
+type ECNFeedbackHandler = congestion.ECNFeedbackHandler
+
+// AppLimitedHandler is an optional hook called when the send queue is drained
+// and no data is available to send.
+type AppLimitedHandler = congestion.AppLimitedHandler
+
+// SpuriousLossHandler is an optional hook called per packet that was spuriously
+// declared lost, along with the reordering distance that triggered the false alarm.
+type SpuriousLossHandler = congestion.SpuriousLossHandler
+
+// PacketReorderingThresholdProvider is an optional hook allowing the controller
+// to override the RFC 9002 default packet reordering threshold of 3.
+type PacketReorderingThresholdProvider = congestion.PacketReorderingThresholdProvider
+
+// PTOHandler is an optional hook called when a PTO timeout fires, with the
+// current bytes-in-flight at the time of the timeout.
+type PTOHandler = congestion.PTOHandler
+
+// ConnectionMigrationHandler is an optional hook called on path migration.
+// If implemented, the controller resets itself in place rather than being
+// replaced with a fresh NewReno instance.
+type ConnectionMigrationHandler = congestion.ConnectionMigrationHandler
 
 // The StreamID is the ID of a QUIC stream.
 type StreamID = protocol.StreamID

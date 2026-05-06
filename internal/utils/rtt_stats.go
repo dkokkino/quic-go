@@ -7,6 +7,15 @@ import (
 	"github.com/quic-go/quic-go/internal/protocol"
 )
 
+// RTTStatsReader provides read access to the connection's RTT estimates.
+// It is a subset of RTTStats exposed as an interface so external congestion
+// controllers can accept it without importing *RTTStats directly.
+type RTTStatsReader interface {
+	LatestRTT() time.Duration
+	SmoothedRTT() time.Duration
+	MeanDeviation() time.Duration
+}
+
 const (
 	rttAlpha      = 0.125
 	oneMinusAlpha = 1 - rttAlpha
