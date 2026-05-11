@@ -48,11 +48,12 @@ type LossDetectionHandler interface {
 	OnLossDetectionStart()
 }
 
-// ECNFeedbackHandler is implemented by congestion controllers that consume
-// QUIC ACK-frame ECN counters directly.
-// Uses stdlib time.Time so implementations can live outside the quic-go module.
-type ECNFeedbackHandler interface {
-	OnECNFeedback(
+// ECNCongestionHandler is implemented by congestion controllers that take ownership
+// of the ECN congestion decision. When implemented, quic-go forwards raw cumulative
+// ECN counters from the ACK frame and skips its own congestion signal. Forwarding is
+// gated on ECN path validation having succeeded.
+type ECNCongestionHandler interface {
+	OnECNCongestion(
 		ackedBytes protocol.ByteCount,
 		ect0Total, ect1Total, ceTotal int64,
 		priorInFlight protocol.ByteCount,
@@ -72,12 +73,6 @@ type SpuriousLossHandler interface {
 	OnSpuriousLossDetected(packetNumber protocol.PacketNumber, packetReordering protocol.PacketNumber)
 }
 
-// PacketReorderingThresholdProvider is implemented by congestion controllers
-// that want to override the default RFC 9002 packet reordering threshold.
-type PacketReorderingThresholdProvider interface {
-	GetPacketReorderThreshold() protocol.PacketNumber
-}
-
 // PTOHandler is implemented by congestion controllers that want an explicit
 // QUIC PTO signal with live inflight.
 type PTOHandler interface {
@@ -86,6 +81,11 @@ type PTOHandler interface {
 
 // ConnectionMigrationHandler is implemented by custom congestion controllers
 // that want to reset themselves in place on path migration.
+//
+// If not implemented, the controller is replaced with a fresh NewReno instance
+// on path migration. RFC 9000 §9.4 mandates that the congestion controller MUST
+// be reset to initial values when a new path is confirmed. Implement this hook
+// if your algorithm manages its own state reset rather than being replaced.
 type ConnectionMigrationHandler interface {
 	OnConnectionMigration(initialMaxDatagramSize protocol.ByteCount)
 }

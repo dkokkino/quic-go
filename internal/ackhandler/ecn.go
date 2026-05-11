@@ -43,6 +43,7 @@ type ecnHandler interface {
 	Mode() protocol.ECN
 	HandleNewlyAcked(packets []packetWithPacketNumber, ect0, ect1, ecnce int64) (congested bool)
 	LostPacket(protocol.PacketNumber)
+	IsECNCapable() bool
 }
 
 // The ecnTracker performs ECN validation of a path.
@@ -136,6 +137,10 @@ func (e *ecnTracker) Mode() protocol.ECN {
 	default:
 		panic(fmt.Sprintf("unknown ECN state: %d", e.state))
 	}
+}
+
+func (e *ecnTracker) IsECNCapable() bool {
+	return e.state == ecnStateCapable
 }
 
 func (e *ecnTracker) LostPacket(pn protocol.PacketNumber) {

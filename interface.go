@@ -21,6 +21,24 @@ type ByteCount = protocol.ByteCount
 // PacketNumber is a QUIC packet number.
 type PacketNumber = protocol.PacketNumber
 
+// Bandwidth represents a connection's bandwidth in bits per second.
+type Bandwidth = congestion.Bandwidth
+
+// BytesPerSecond is 1 byte per second, used for bandwidth calculations.
+const BytesPerSecond = congestion.BytesPerSecond
+
+// Pacer is a token-bucket pacer that external congestion controllers can compose.
+// Use NewPacer to create one with a caller-supplied bandwidth function.
+type Pacer = congestion.Pacer
+
+// NewPacer creates a Pacer with a caller-supplied bandwidth function.
+// getBandwidth must return the current pacing rate. The caller controls the
+// pacing gain — pass the raw estimate, a fixed multiplier (e.g. bw * 5 / 4
+// for NewReno), or a state-dependent gain (e.g. BBRv3's pacingGain).
+func NewPacer(getBandwidth func() Bandwidth) *Pacer {
+	return congestion.NewPacer(getBandwidth)
+}
+
 // RTTStatsReader provides read access to the connection's RTT estimates.
 // Congestion controllers that implement SetRTTStats should accept this
 // interface rather than *utils.RTTStats to avoid importing internal packages.
@@ -45,9 +63,12 @@ type AckEventHandler = congestion.AckEventHandler
 // pass, allowing the controller to snapshot state before packets are declared lost.
 type LossDetectionHandler = congestion.LossDetectionHandler
 
-// ECNFeedbackHandler is an optional hook for controllers that consume raw ECN
-// counters (ECT0, ECT1, CE) from QUIC ACK frames directly.
-type ECNFeedbackHandler = congestion.ECNFeedbackHandler
+// ECNCongestionHandler is an optional hook for controllers that take full ownership
+// of the ECN congestion decision. Implementing this interface signals to quic-go that
+// the controller will react to raw ECN counters directly — quic-go skips its own
+// congestion signal and forwards the raw cumulative counters instead, gated on ECN
+// path validation having succeeded.
+type ECNCongestionHandler = congestion.ECNCongestionHandler
 
 // AppLimitedHandler is an optional hook called when the send queue is drained
 // and no data is available to send.
@@ -57,17 +78,15 @@ type AppLimitedHandler = congestion.AppLimitedHandler
 // declared lost, along with the reordering distance that triggered the false alarm.
 type SpuriousLossHandler = congestion.SpuriousLossHandler
 
-// PacketReorderingThresholdProvider is an optional hook allowing the controller
-// to override the RFC 9002 default packet reordering threshold of 3.
-type PacketReorderingThresholdProvider = congestion.PacketReorderingThresholdProvider
-
 // PTOHandler is an optional hook called when a PTO timeout fires, with the
 // current bytes-in-flight at the time of the timeout.
 type PTOHandler = congestion.PTOHandler
 
 // ConnectionMigrationHandler is an optional hook called on path migration.
-// If implemented, the controller resets itself in place rather than being
-// replaced with a fresh NewReno instance.
+// RFC 9000 §9.4 mandates that the congestion controller MUST be reset to
+// initial values when a new path is confirmed. If not implemented, the
+// controller is replaced with a fresh NewReno instance. Implement this hook
+// if your algorithm manages its own state reset rather than being replaced.
 type ConnectionMigrationHandler = congestion.ConnectionMigrationHandler
 
 // The StreamID is the ID of a QUIC stream.
@@ -234,12 +253,12 @@ type Config struct {
 	EnableStreamResetPartialDelivery bool
 
 	// Congestion optionally provides a factory function that returns a custom congestion
-	// controller. The factory is called once per connection, immediately before the
-	// handshake begins. If nil, the default NewReno implementation is used.
+	// controller. The factory is called once during connection construction. If nil,
+	// the default NewReno implementation is used.
 	//
-	// The returned controller must implement CongestionController (an alias for
-	// internal/congestion.SendAlgorithmWithDebugInfos). See the algo/* branches for
-	// reference implementations.
+	// The returned controller must implement CongestionController. Optional behaviour
+	// (ACK event boundaries, ECN feedback, app-limited tracking, etc.) is expressed
+	// via the hook interfaces defined in this file — implement only the ones needed.
 	Congestion func() CongestionController
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace

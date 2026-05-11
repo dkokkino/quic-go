@@ -442,28 +442,16 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		}
 	}
 
-	// Only process ECN details for new 1-RTT ACKs that increase the largest acked.
-	if encLevel == protocol.Encryption1RTT && largestAcked > pnSpace.largestAcked {
-		if h.ecnTracker != nil {
-			congested := h.ecnTracker.HandleNewlyAcked(ackedPackets, int64(ack.ECT0), int64(ack.ECT1), int64(ack.ECNCE))
-			if congested {
-				h.congestion.OnCongestionEvent(largestAcked, 0, priorInFlight)
-			}
-		}
-		if ecnFeedback, ok := h.congestion.(congestion.ECNFeedbackHandler); ok {
-			ecnFeedback.OnECNFeedback(
-				ackedInFlightBytes,
-				int64(ack.ECT0),
-				int64(ack.ECT1),
-				int64(ack.ECNCE),
-				priorInFlight,
-				rcvTime.ToTime(),
-			)
-		}
-	}
+	// Capture whether this ACK advances the largest acked before updating the field,
+	// so the ECN block below can use the same condition after loss detection has run.
+	isNewLargestAcked := encLevel == protocol.Encryption1RTT && largestAcked > pnSpace.largestAcked
 
 	pnSpace.largestAcked = max(pnSpace.largestAcked, largestAcked)
 
+	// Signal loss-detection start first so controllers can reset per-pass counters
+	// before any OnCongestionEvent calls (both packet-loss and ECN-driven) arrive.
+	// Signal loss-detection start first so controllers can reset per-pass counters
+	// before any OnCongestionEvent calls (both packet-loss and ECN-driven) arrive.
 	if lossStart, ok := h.congestion.(congestion.LossDetectionHandler); ok {
 		lossStart.OnLossDetectionStart()
 	}
@@ -471,6 +459,30 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	if encLevel == protocol.Encryption1RTT {
 		h.detectLostPathProbes(rcvTime)
 	}
+
+	// Process ECN details for new 1-RTT ACKs that increase the largest acked.
+	// Placed after loss detection so all congestion signals (loss and ECN) arrive
+	// after OnLossDetectionStart, giving controllers a consistent per-pass reset point.
+	if isNewLargestAcked {
+		if h.ecnTracker != nil {
+			congested := h.ecnTracker.HandleNewlyAcked(ackedPackets, int64(ack.ECT0), int64(ack.ECT1), int64(ack.ECNCE))
+			if ecnHandler, ok := h.congestion.(congestion.ECNCongestionHandler); ok {
+				if h.ecnTracker.IsECNCapable() {
+					ecnHandler.OnECNCongestion(
+						ackedInFlightBytes,
+						int64(ack.ECT0),
+						int64(ack.ECT1),
+						int64(ack.ECNCE),
+						priorInFlight,
+						rcvTime.ToTime(),
+					)
+				}
+			} else if congested {
+				h.congestion.OnCongestionEvent(largestAcked, 0, priorInFlight)
+			}
+		}
+	}
+
 	if ackEventStart, ok := h.congestion.(congestion.AckEventHandler); ok {
 		ackEventStart.OnAckEventStart(rcvTime.ToTime(), h.bytesInFlight)
 	}
@@ -848,9 +860,6 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 	pnSpace := h.getPacketNumberSpace(encLevel)
 	pnSpace.lossTime = 0
 	packetReorderThreshold := protocol.PacketNumber(packetThreshold)
-	if pth, ok := h.congestion.(congestion.PacketReorderingThresholdProvider); ok {
-		packetReorderThreshold = pth.GetPacketReorderThreshold()
-	}
 
 	maxRTT := float64(max(h.rttStats.LatestRTT(), h.rttStats.SmoothedRTT()))
 	lossDelay := time.Duration(timeThreshold * maxRTT)

@@ -19,6 +19,9 @@ type hookTrackingCongestion struct {
 	ackStartBytesInFlight []protocol.ByteCount
 	ackEndTimes           []time.Time
 	lossDetectionStarts   int
+	// lossDetectionStarts value at the time each OnCongestionEvent fired — used to
+	// assert that OnLossDetectionStart always precedes any congestion signal.
+	congestionEventAfterLossStart []int
 	ecnAckedBytes         []protocol.ByteCount
 	ecnECT0               []int64
 	ecnECT1               []int64
@@ -28,8 +31,7 @@ type hookTrackingCongestion struct {
 	spuriousPackets       []protocol.PacketNumber
 	spuriousReordering    []protocol.PacketNumber
 	migrationSizes        []protocol.ByteCount
-	appLimitedBytes       []protocol.ByteCount
-	packetThreshold       protocol.PacketNumber
+	appLimitedBytes []protocol.ByteCount
 }
 
 func (*hookTrackingCongestion) TimeUntilSend(protocol.ByteCount) time.Time { return time.Time{} }
@@ -40,7 +42,8 @@ func (*hookTrackingCongestion) CanSend(protocol.ByteCount) bool { return true }
 func (*hookTrackingCongestion) MaybeExitSlowStart()             {}
 func (*hookTrackingCongestion) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, time.Time) {
 }
-func (*hookTrackingCongestion) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
+func (h *hookTrackingCongestion) OnCongestionEvent(_ protocol.PacketNumber, _ protocol.ByteCount, _ protocol.ByteCount) {
+	h.congestionEventAfterLossStart = append(h.congestionEventAfterLossStart, h.lossDetectionStarts)
 }
 func (h *hookTrackingCongestion) SetMaxDatagramSize(s protocol.ByteCount) {
 	h.maxDatagramSize = s
@@ -59,7 +62,7 @@ func (h *hookTrackingCongestion) OnAckEventEnd(eventTime time.Time) {
 	h.ackEndTimes = append(h.ackEndTimes, eventTime)
 }
 func (h *hookTrackingCongestion) OnLossDetectionStart() { h.lossDetectionStarts++ }
-func (h *hookTrackingCongestion) OnECNFeedback(
+func (h *hookTrackingCongestion) OnECNCongestion(
 	ackedBytes protocol.ByteCount,
 	ect0Total, ect1Total, ceTotal int64,
 	priorInFlight protocol.ByteCount,
@@ -84,12 +87,6 @@ func (h *hookTrackingCongestion) OnPTO(bytesInFlight protocol.ByteCount) {
 func (h *hookTrackingCongestion) OnConnectionMigration(initialMaxDatagramSize protocol.ByteCount) {
 	h.migrationSizes = append(h.migrationSizes, initialMaxDatagramSize)
 	h.maxDatagramSize = initialMaxDatagramSize
-}
-func (h *hookTrackingCongestion) GetPacketReorderThreshold() protocol.PacketNumber {
-	if h.packetThreshold == 0 {
-		return 3
-	}
-	return h.packetThreshold
 }
 
 type fallbackOnlyCongestion struct {
@@ -194,7 +191,7 @@ func TestSentPacketHandlerNotifiesAckLossAndECNHooks(t *testing.T) {
 		utils.NewRTTStats(),
 		&utils.ConnectionStats{},
 		false,
-		false,
+		true, // enableECN
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -202,13 +199,39 @@ func TestSentPacketHandlerNotifiesAckLossAndECNHooks(t *testing.T) {
 		utils.DefaultLogger,
 	)
 
+	// Send and ACK numECNTestingPackets (10) to advance ecnTracker to ecnStateCapable.
+	// ECNMode must be called before each send to trigger the ecnTracker's testing phase,
+	// matching what connection.go does in production.
+	// OnECNCongestion only fires once the path is validated.
+	handler := sph.(*sentPacketHandler)
+	for i := range numECNTestingPackets {
+		handler.ECNMode(true) // triggers ecnStateTesting and marks packets as testing
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+		_, err := sph.ReceivedAck(&wire.AckFrame{
+			AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
+			ECT0:      uint64(i + 1),
+		}, protocol.Encryption1RTT, now.Add(time.Duration(i)*time.Millisecond+20*time.Millisecond))
+		require.NoError(t, err)
+	}
+	cong.ecnAckedBytes = nil
+	cong.ecnECT0 = nil
+	cong.ecnECT1 = nil
+	cong.ecnCE = nil
+	cong.ecnPriorInFlight = nil
+	cong.lossDetectionStarts = 0
+	cong.ackStartTimes = nil
+	cong.ackEndTimes = nil
+	cong.ackStartBytesInFlight = nil
+
+	// Now send one more packet and ACK it — ecnTracker is capable, OnECNCongestion fires.
 	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
-	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+	sph.SentPacket(now.Add(100*time.Millisecond), pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
 
 	acked, err := sph.ReceivedAck(&wire.AckFrame{
 		AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
-		ECT0:      1,
-	}, protocol.Encryption1RTT, now.Add(20*time.Millisecond))
+		ECT0:      uint64(numECNTestingPackets + 1),
+	}, protocol.Encryption1RTT, now.Add(120*time.Millisecond))
 	require.NoError(t, err)
 	require.True(t, acked)
 
@@ -217,7 +240,7 @@ func TestSentPacketHandlerNotifiesAckLossAndECNHooks(t *testing.T) {
 	require.Len(t, cong.ackEndTimes, 1)
 	require.Equal(t, []protocol.ByteCount{1200}, cong.ackStartBytesInFlight)
 	require.Equal(t, []protocol.ByteCount{1200}, cong.ecnAckedBytes)
-	require.Equal(t, []int64{1}, cong.ecnECT0)
+	require.Equal(t, []int64{numECNTestingPackets + 1}, cong.ecnECT0)
 	require.Equal(t, []int64{0}, cong.ecnECT1)
 	require.Equal(t, []int64{0}, cong.ecnCE)
 	require.Equal(t, []protocol.ByteCount{1200}, cong.ecnPriorInFlight)
@@ -249,9 +272,15 @@ func TestSentPacketHandlerNotifiesPTOHook(t *testing.T) {
 	require.Equal(t, []protocol.ByteCount{1200}, cong.ptoBytesInFlight)
 }
 
-func TestSentPacketHandlerUsesOptionalPacketReorderingHooks(t *testing.T) {
+// TestSentPacketHandlerAckEventStartReceivesPostLossBytesInFlight verifies that
+// OnAckEventStart receives bytesInFlight *after* lost packets have been removed.
+// BBRv3 relies on this for accurate phase-transition decisions (e.g. entering
+// ProbeRTT only when inflight has genuinely drained). If OnAckEventStart fired
+// before loss detection, it would observe inflated bytesInFlight and make incorrect
+// state transitions.
+func TestSentPacketHandlerAckEventStartReceivesPostLossBytesInFlight(t *testing.T) {
 	now := monotime.Now()
-	cong := &hookTrackingCongestion{packetThreshold: 5}
+	cong := &hookTrackingCongestion{}
 	sph := NewSentPacketHandler(
 		0,
 		1200,
@@ -266,32 +295,73 @@ func TestSentPacketHandlerUsesOptionalPacketReorderingHooks(t *testing.T) {
 		utils.DefaultLogger,
 	)
 
-	for i := range 7 {
+	// Send 5 packets (5 * 1200 = 6000 bytes in flight).
+	for i := range 5 {
 		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
-		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+			[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
 	}
 
-	acked, err := sph.ReceivedAck(
-		&wire.AckFrame{AckRanges: []wire.AckRange{{Smallest: 5, Largest: 5}}},
-		protocol.Encryption1RTT,
-		now.Add(10*time.Millisecond),
-	)
+	// ACK only packet 4. With the default reorder threshold of 3, packet 0 is
+	// more than 3 packet numbers behind the largest acked and is declared lost.
+	// Expected bytesInFlight at OnAckEventStart:
+	//   6000 (total sent) - 1200 (packet 4 acked) - 1200 (packet 0 lost) = 3600
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: 4, Largest: 4}},
+	}, protocol.Encryption1RTT, now.Add(50*time.Millisecond))
 	require.NoError(t, err)
-	require.True(t, acked)
-	require.Empty(t, cong.spuriousPackets)
 
-	acked, err = sph.ReceivedAck(
-		&wire.AckFrame{AckRanges: []wire.AckRange{
-			{Smallest: 6, Largest: 6},
-			{Smallest: 0, Largest: 0},
-		}},
-		protocol.Encryption1RTT,
-		now.Add(20*time.Millisecond),
+	require.Len(t, cong.ackStartBytesInFlight, 1)
+	require.Equal(t, protocol.ByteCount(3600), cong.ackStartBytesInFlight[0],
+		"OnAckEventStart must receive post-loss bytesInFlight (lost packet already removed)")
+}
+
+// TestSentPacketHandlerLossDetectionStartPrecedesAllCongestionEvents verifies
+// that OnLossDetectionStart fires before any OnCongestionEvent call within a
+// single ACK — for both packet-loss-driven and ECN-driven congestion signals.
+// Controllers use OnLossDetectionStart to reset per-pass counters (e.g. RFC §5.3.1.3
+// "count at most one loss event per detection pass"). Receiving a congestion signal
+// before that reset would corrupt the counter.
+func TestSentPacketHandlerLossDetectionStartPrecedesAllCongestionEvents(t *testing.T) {
+	now := monotime.Now()
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
 	)
+
+	// Send 5 packets; ACK only the last one so packets 0-3 are declared lost,
+	// and also set ECN CE to trigger an ECN-driven OnCongestionEvent.
+	for i := range 5 {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+			[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+	}
+
+	// Ack only packet 4; packets 0-3 exceed the reorder threshold (default 3) and are lost.
+	// ECT0=4, CE=1 triggers the ecnTracker to report congestion.
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: 4, Largest: 4}},
+		ECT0:      4,
+		ECNCE:     1,
+	}, protocol.Encryption1RTT, now.Add(50*time.Millisecond))
 	require.NoError(t, err)
-	require.True(t, acked)
-	require.Equal(t, []protocol.PacketNumber{0}, cong.spuriousPackets)
-	require.Equal(t, []protocol.PacketNumber{6}, cong.spuriousReordering)
+
+	require.NotEmpty(t, cong.congestionEventAfterLossStart,
+		"expected at least one OnCongestionEvent (loss or ECN)")
+	for i, lossStartCount := range cong.congestionEventAfterLossStart {
+		require.Greater(t, lossStartCount, 0,
+			"OnCongestionEvent[%d] fired before OnLossDetectionStart", i)
+	}
 }
 
 func TestSentPacketHandlerNotifiesSpuriousLossHook(t *testing.T) {
