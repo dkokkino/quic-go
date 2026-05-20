@@ -1,0 +1,855 @@
+package ackhandler
+
+import (
+	"testing"
+	"time"
+
+	"github.com/quic-go/quic-go/internal/monotime"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/stretchr/testify/require"
+)
+
+type hookTrackingCongestion struct {
+	maxDatagramSize protocol.ByteCount
+	rttStats        *utils.RTTStats
+
+	ackStartTimes         []time.Time
+	ackStartBytesInFlight []protocol.ByteCount
+	ackEndTimes           []time.Time
+	lossDetectionStarts   int
+	// lossDetectionStarts value at the time each OnCongestionEvent fired — used to
+	// assert that OnLossDetectionStart always precedes any congestion signal.
+	congestionEventAfterLossStart []int
+	ecnAckedBytes         []protocol.ByteCount
+	ecnECT0               []int64
+	ecnECT1               []int64
+	ecnCE                 []int64
+	ecnPriorInFlight      []protocol.ByteCount
+	ptoBytesInFlight      []protocol.ByteCount
+	spuriousPackets       []protocol.PacketNumber
+	spuriousReordering    []protocol.PacketNumber
+	migrationSizes        []protocol.ByteCount
+	appLimitedBytes []protocol.ByteCount
+}
+
+func (*hookTrackingCongestion) TimeUntilSend(protocol.ByteCount) time.Time { return time.Time{} }
+func (*hookTrackingCongestion) HasPacingBudget(time.Time) bool             { return true }
+func (*hookTrackingCongestion) OnPacketSent(time.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
+}
+func (*hookTrackingCongestion) CanSend(protocol.ByteCount) bool    { return true }
+func (*hookTrackingCongestion) MaybeExitSlowStart()                {}
+func (*hookTrackingCongestion) OnRetransmissionTimeout(_ bool)     {}
+func (*hookTrackingCongestion) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, time.Time) {
+}
+func (h *hookTrackingCongestion) OnCongestionEvent(_ protocol.PacketNumber, _ protocol.ByteCount, _ protocol.ByteCount) {
+	h.congestionEventAfterLossStart = append(h.congestionEventAfterLossStart, h.lossDetectionStarts)
+}
+func (h *hookTrackingCongestion) SetMaxDatagramSize(s protocol.ByteCount) {
+	h.maxDatagramSize = s
+}
+func (*hookTrackingCongestion) InSlowStart() bool { return false }
+func (*hookTrackingCongestion) InRecovery() bool  { return false }
+func (h *hookTrackingCongestion) GetCongestionWindow() protocol.ByteCount {
+	return h.maxDatagramSize * 10
+}
+func (h *hookTrackingCongestion) SetRTTStats(rttStats utils.RTTStatsReader) {
+	h.rttStats = rttStats.(*utils.RTTStats)
+}
+func (h *hookTrackingCongestion) OnAckEventStart(eventTime time.Time, bytesInFlight protocol.ByteCount) {
+	h.ackStartTimes = append(h.ackStartTimes, eventTime)
+	h.ackStartBytesInFlight = append(h.ackStartBytesInFlight, bytesInFlight)
+}
+func (h *hookTrackingCongestion) OnAckEventEnd(eventTime time.Time) {
+	h.ackEndTimes = append(h.ackEndTimes, eventTime)
+}
+func (h *hookTrackingCongestion) OnLossDetectionStart() { h.lossDetectionStarts++ }
+func (h *hookTrackingCongestion) OnECNCongestion(
+	ackedBytes protocol.ByteCount,
+	ect0Total, ect1Total, ceTotal int64,
+	priorInFlight protocol.ByteCount,
+	_ time.Time,
+) {
+	h.ecnAckedBytes = append(h.ecnAckedBytes, ackedBytes)
+	h.ecnECT0 = append(h.ecnECT0, ect0Total)
+	h.ecnECT1 = append(h.ecnECT1, ect1Total)
+	h.ecnCE = append(h.ecnCE, ceTotal)
+	h.ecnPriorInFlight = append(h.ecnPriorInFlight, priorInFlight)
+}
+func (h *hookTrackingCongestion) MarkAppLimited(bytesInFlight protocol.ByteCount) {
+	h.appLimitedBytes = append(h.appLimitedBytes, bytesInFlight)
+}
+func (h *hookTrackingCongestion) OnSpuriousLossDetected(packetNumber, packetReordering protocol.PacketNumber) {
+	h.spuriousPackets = append(h.spuriousPackets, packetNumber)
+	h.spuriousReordering = append(h.spuriousReordering, packetReordering)
+}
+func (h *hookTrackingCongestion) OnPTO(bytesInFlight protocol.ByteCount) {
+	h.ptoBytesInFlight = append(h.ptoBytesInFlight, bytesInFlight)
+}
+func (h *hookTrackingCongestion) OnConnectionMigration(initialMaxDatagramSize protocol.ByteCount) {
+	h.migrationSizes = append(h.migrationSizes, initialMaxDatagramSize)
+	h.maxDatagramSize = initialMaxDatagramSize
+}
+
+type fallbackOnlyCongestion struct {
+	maxDatagramSize protocol.ByteCount
+}
+
+func (*fallbackOnlyCongestion) TimeUntilSend(protocol.ByteCount) time.Time { return time.Time{} }
+func (*fallbackOnlyCongestion) HasPacingBudget(time.Time) bool             { return true }
+func (*fallbackOnlyCongestion) OnPacketSent(time.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
+}
+func (*fallbackOnlyCongestion) CanSend(protocol.ByteCount) bool    { return true }
+func (*fallbackOnlyCongestion) MaybeExitSlowStart()                {}
+func (*fallbackOnlyCongestion) OnRetransmissionTimeout(_ bool)     {}
+func (*fallbackOnlyCongestion) OnPacketAcked(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount, time.Time) {
+}
+func (*fallbackOnlyCongestion) OnCongestionEvent(protocol.PacketNumber, protocol.ByteCount, protocol.ByteCount) {
+}
+func (f *fallbackOnlyCongestion) SetMaxDatagramSize(s protocol.ByteCount) {
+	f.maxDatagramSize = s
+}
+func (*fallbackOnlyCongestion) InSlowStart() bool { return false }
+func (*fallbackOnlyCongestion) InRecovery() bool  { return false }
+func (f *fallbackOnlyCongestion) GetCongestionWindow() protocol.ByteCount {
+	return f.maxDatagramSize * 10
+}
+
+func TestSentPacketHandlerBindsCustomControllerState(t *testing.T) {
+	rttStats := utils.NewRTTStats()
+	cong := &hookTrackingCongestion{}
+
+	sph := NewSentPacketHandler(
+		0,
+		1234,
+		rttStats,
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	handler := sph.(*sentPacketHandler)
+	require.False(t, handler.usesDefaultCongestion)
+	require.Same(t, cong, handler.customCC)
+	require.Same(t, rttStats, cong.rttStats)
+	require.Equal(t, protocol.ByteCount(1234), cong.maxDatagramSize)
+}
+
+func TestSentPacketHandlerMigrationHookForCustomController(t *testing.T) {
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	handler := sph.(*sentPacketHandler)
+	handler.MigratedPath(monotime.Now(), 1400)
+
+	require.Same(t, cong, handler.customCC)
+	require.Equal(t, []protocol.ByteCount{1400}, cong.migrationSizes)
+}
+
+func TestSentPacketHandlerMigrationFallsBackWithoutHook(t *testing.T) {
+	cong := &fallbackOnlyCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	handler := sph.(*sentPacketHandler)
+	handler.MigratedPath(monotime.Now(), 1400)
+
+	require.NotSame(t, cong, handler.congestion)
+}
+
+func TestSentPacketHandlerNotifiesAckLossAndECNHooks(t *testing.T) {
+	now := monotime.Now()
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		true, // enableECN
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	// Send and ACK numECNTestingPackets (10) to advance ecnTracker to ecnStateCapable.
+	// ECNMode must be called before each send to trigger the ecnTracker's testing phase,
+	// matching what connection.go does in production.
+	// OnECNCongestion only fires once the path is validated.
+	handler := sph.(*sentPacketHandler)
+	for i := range numECNTestingPackets {
+		handler.ECNMode(true) // triggers ecnStateTesting and marks packets as testing
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+		_, err := sph.ReceivedAck(&wire.AckFrame{
+			AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
+			ECT0:      uint64(i + 1),
+		}, protocol.Encryption1RTT, now.Add(time.Duration(i)*time.Millisecond+20*time.Millisecond))
+		require.NoError(t, err)
+	}
+	cong.ecnAckedBytes = nil
+	cong.ecnECT0 = nil
+	cong.ecnECT1 = nil
+	cong.ecnCE = nil
+	cong.ecnPriorInFlight = nil
+	cong.lossDetectionStarts = 0
+	cong.ackStartTimes = nil
+	cong.ackEndTimes = nil
+	cong.ackStartBytesInFlight = nil
+
+	// Now send one more packet and ACK it — ecnTracker is capable, OnECNCongestion fires.
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(100*time.Millisecond), pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+
+	acked, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
+		ECT0:      uint64(numECNTestingPackets + 1),
+	}, protocol.Encryption1RTT, now.Add(120*time.Millisecond))
+	require.NoError(t, err)
+	require.True(t, acked)
+
+	require.Equal(t, 1, cong.lossDetectionStarts)
+	require.Len(t, cong.ackStartTimes, 1)
+	require.Len(t, cong.ackEndTimes, 1)
+	require.Equal(t, []protocol.ByteCount{1200}, cong.ackStartBytesInFlight)
+	require.Equal(t, []protocol.ByteCount{1200}, cong.ecnAckedBytes)
+	require.Equal(t, []int64{numECNTestingPackets + 1}, cong.ecnECT0)
+	require.Equal(t, []int64{0}, cong.ecnECT1)
+	require.Equal(t, []int64{0}, cong.ecnCE)
+	require.Equal(t, []protocol.ByteCount{1200}, cong.ecnPriorInFlight)
+}
+
+func TestSentPacketHandlerNotifiesPTOHook(t *testing.T) {
+	now := monotime.Now()
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	pn := sph.PopPacketNumber(protocol.EncryptionInitial)
+	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.EncryptionInitial, protocol.ECNNon, 1200, false, false)
+
+	timeout := sph.GetLossDetectionTimeout()
+	require.NotZero(t, timeout)
+	require.NoError(t, sph.OnLossDetectionTimeout(timeout))
+	require.Equal(t, []protocol.ByteCount{1200}, cong.ptoBytesInFlight)
+}
+
+// TestSentPacketHandlerAckEventStartReceivesPostLossBytesInFlight verifies that
+// OnAckEventStart receives bytesInFlight *after* lost packets have been removed.
+// BBRv3 relies on this for accurate phase-transition decisions (e.g. entering
+// ProbeRTT only when inflight has genuinely drained). If OnAckEventStart fired
+// before loss detection, it would observe inflated bytesInFlight and make incorrect
+// state transitions.
+func TestSentPacketHandlerAckEventStartReceivesPostLossBytesInFlight(t *testing.T) {
+	now := monotime.Now()
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	// Send 5 packets (5 * 1200 = 6000 bytes in flight).
+	for i := range 5 {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+			[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	}
+
+	// ACK only packet 4. With the default reorder threshold of 3, packet 0 is
+	// more than 3 packet numbers behind the largest acked and is declared lost.
+	// Expected bytesInFlight at OnAckEventStart:
+	//   6000 (total sent) - 1200 (packet 4 acked) - 1200 (packet 0 lost) = 3600
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: 4, Largest: 4}},
+	}, protocol.Encryption1RTT, now.Add(50*time.Millisecond))
+	require.NoError(t, err)
+
+	require.Len(t, cong.ackStartBytesInFlight, 1)
+	require.Equal(t, protocol.ByteCount(3600), cong.ackStartBytesInFlight[0],
+		"OnAckEventStart must receive post-loss bytesInFlight (lost packet already removed)")
+}
+
+// TestSentPacketHandlerLossDetectionStartPrecedesAllCongestionEvents verifies
+// that OnLossDetectionStart fires before any OnCongestionEvent call within a
+// single ACK — for both packet-loss-driven and ECN-driven congestion signals.
+// Controllers use OnLossDetectionStart to reset per-pass counters (e.g. RFC §5.3.1.3
+// "count at most one loss event per detection pass"). Receiving a congestion signal
+// before that reset would corrupt the counter.
+func TestSentPacketHandlerLossDetectionStartPrecedesAllCongestionEvents(t *testing.T) {
+	now := monotime.Now()
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	// Send 5 packets; ACK only the last one so packets 0-3 are declared lost,
+	// and also set ECN CE to trigger an ECN-driven OnCongestionEvent.
+	for i := range 5 {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+			[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+	}
+
+	// Ack only packet 4; packets 0-3 exceed the reorder threshold (default 3) and are lost.
+	// ECT0=4, CE=1 triggers the ecnTracker to report congestion.
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: 4, Largest: 4}},
+		ECT0:      4,
+		ECNCE:     1,
+	}, protocol.Encryption1RTT, now.Add(50*time.Millisecond))
+	require.NoError(t, err)
+
+	require.NotEmpty(t, cong.congestionEventAfterLossStart,
+		"expected at least one OnCongestionEvent (loss or ECN)")
+	for i, lossStartCount := range cong.congestionEventAfterLossStart {
+		require.Greater(t, lossStartCount, 0,
+			"OnCongestionEvent[%d] fired before OnLossDetectionStart", i)
+	}
+}
+
+func TestSentPacketHandlerNotifiesSpuriousLossHook(t *testing.T) {
+	now := monotime.Now()
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	var firstSendTime monotime.Time
+	for i := range 4 {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sendTime := now.Add(time.Duration(i) * time.Millisecond)
+		if i == 0 {
+			firstSendTime = sendTime
+		}
+		sph.SentPacket(sendTime, pn, protocol.InvalidPacketNumber, nil, []Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	}
+
+	handler := sph.(*sentPacketHandler)
+	handler.lostPackets.Add(0, firstSendTime)
+	handler.detectSpuriousLosses(
+		&wire.AckFrame{
+			AckRanges: []wire.AckRange{
+				{Smallest: 4, Largest: 4},
+				{Smallest: 0, Largest: 0},
+			},
+		},
+		now.Add(10*time.Millisecond),
+	)
+
+	require.Equal(t, []protocol.PacketNumber{0}, cong.spuriousPackets)
+	require.Equal(t, []protocol.PacketNumber{4}, cong.spuriousReordering)
+}
+
+func TestSentPacketHandlerMarkAppLimitedForwardsBytesInFlight(t *testing.T) {
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	).(*sentPacketHandler)
+	sph.bytesInFlight = 4321
+
+	sph.MarkAppLimited()
+
+	require.Equal(t, []protocol.ByteCount{4321}, cong.appLimitedBytes)
+}
+
+// TestSentPacketHandlerTimerLossDetectionStartPrecedesCongestionEvents verifies
+// that OnLossDetectionStart fires before OnCongestionEvent on the timer-triggered
+// loss detection path (OnLossDetectionTimeout), not just the ACK-driven path.
+func TestSentPacketHandlerTimerLossDetectionStartPrecedesCongestionEvents(t *testing.T) {
+	now := monotime.Now()
+	cong := &hookTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(20*time.Millisecond, 0)
+
+	// Send 2 packets. ACK packet 1 to set largestAcked and establish RTT,
+	// leaving packet 0 outstanding. The loss timer will fire and declare it lost.
+	pn0 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn0, protocol.InvalidPacketNumber, nil,
+		[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	pn1 := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(time.Millisecond), pn1, protocol.InvalidPacketNumber, nil,
+		[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+
+	sph.(*sentPacketHandler).rttStats.UpdateRTT(20*time.Millisecond, 0)
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: pn1, Largest: pn1}},
+	}, protocol.Encryption1RTT, now.Add(50*time.Millisecond))
+	require.NoError(t, err)
+
+	// Reset counters — we only care about what happens on the timer path.
+	cong.lossDetectionStarts = 0
+	cong.congestionEventAfterLossStart = nil
+
+	// Fire the loss detection timer — packet 0 is declared lost via time threshold.
+	timeout := sph.GetLossDetectionTimeout()
+	require.NotZero(t, timeout)
+	require.NoError(t, sph.OnLossDetectionTimeout(timeout))
+
+	require.NotEmpty(t, cong.congestionEventAfterLossStart,
+		"expected OnCongestionEvent to fire on timer-triggered loss")
+	for i, lossStartCount := range cong.congestionEventAfterLossStart {
+		require.Greater(t, lossStartCount, 0,
+			"OnCongestionEvent[%d] fired before OnLossDetectionStart on timer path", i)
+	}
+}
+
+// sequenceTrackingCongestion records the name of each dispatch hook call in order,
+// allowing the full 7-step dispatch sequence to be verified end-to-end.
+type sequenceTrackingCongestion struct {
+	hookTrackingCongestion
+	events []string
+}
+
+func (s *sequenceTrackingCongestion) OnLossDetectionStart() {
+	s.hookTrackingCongestion.OnLossDetectionStart()
+	s.events = append(s.events, "OnLossDetectionStart")
+}
+func (s *sequenceTrackingCongestion) OnCongestionEvent(pn protocol.PacketNumber, lb, pif protocol.ByteCount) {
+	s.hookTrackingCongestion.OnCongestionEvent(pn, lb, pif)
+	s.events = append(s.events, "OnCongestionEvent")
+}
+func (s *sequenceTrackingCongestion) OnAckEventStart(t time.Time, bif protocol.ByteCount) {
+	s.hookTrackingCongestion.OnAckEventStart(t, bif)
+	s.events = append(s.events, "OnAckEventStart")
+}
+func (s *sequenceTrackingCongestion) OnPacketAcked(pn protocol.PacketNumber, ab, pif protocol.ByteCount, t time.Time) {
+	s.events = append(s.events, "OnPacketAcked")
+}
+func (s *sequenceTrackingCongestion) OnAckEventEnd(t time.Time) {
+	s.hookTrackingCongestion.OnAckEventEnd(t)
+	s.events = append(s.events, "OnAckEventEnd")
+}
+func (s *sequenceTrackingCongestion) OnECNCongestion(
+	ackedBytes protocol.ByteCount,
+	ect0Total, ect1Total, ceTotal int64,
+	priorInFlight protocol.ByteCount,
+	eventTime time.Time,
+) {
+	s.hookTrackingCongestion.OnECNCongestion(ackedBytes, ect0Total, ect1Total, ceTotal, priorInFlight, eventTime)
+	s.events = append(s.events, "OnECNCongestion")
+}
+
+// noECNSequenceTrackingCongestion is identical to sequenceTrackingCongestion but
+// intentionally does NOT implement ECNCongestionHandler. This allows tests to
+// exercise the fallback path where quic-go fires OnCongestionEvent(lostBytes=0)
+// for ECN congestion signals instead of calling OnECNCongestion.
+type noECNSequenceTrackingCongestion struct {
+	maxDatagramSize protocol.ByteCount
+	events          []string
+}
+
+func (*noECNSequenceTrackingCongestion) TimeUntilSend(protocol.ByteCount) time.Time { return time.Time{} }
+func (*noECNSequenceTrackingCongestion) HasPacingBudget(time.Time) bool             { return true }
+func (*noECNSequenceTrackingCongestion) OnPacketSent(time.Time, protocol.ByteCount, protocol.PacketNumber, protocol.ByteCount, bool) {
+}
+func (*noECNSequenceTrackingCongestion) CanSend(protocol.ByteCount) bool { return true }
+func (*noECNSequenceTrackingCongestion) MaybeExitSlowStart()             {}
+func (n *noECNSequenceTrackingCongestion) OnPacketAcked(_ protocol.PacketNumber, _, _ protocol.ByteCount, _ time.Time) {
+	n.events = append(n.events, "OnPacketAcked")
+}
+func (n *noECNSequenceTrackingCongestion) OnCongestionEvent(_ protocol.PacketNumber, _ protocol.ByteCount, _ protocol.ByteCount) {
+	n.events = append(n.events, "OnCongestionEvent")
+}
+func (n *noECNSequenceTrackingCongestion) SetMaxDatagramSize(s protocol.ByteCount) {
+	n.maxDatagramSize = s
+}
+func (*noECNSequenceTrackingCongestion) InSlowStart() bool { return false }
+func (*noECNSequenceTrackingCongestion) InRecovery() bool  { return false }
+func (n *noECNSequenceTrackingCongestion) GetCongestionWindow() protocol.ByteCount {
+	return n.maxDatagramSize * 10
+}
+func (n *noECNSequenceTrackingCongestion) OnLossDetectionStart() {
+	n.events = append(n.events, "OnLossDetectionStart")
+}
+func (n *noECNSequenceTrackingCongestion) OnAckEventStart(_ time.Time, _ protocol.ByteCount) {
+	n.events = append(n.events, "OnAckEventStart")
+}
+func (n *noECNSequenceTrackingCongestion) OnAckEventEnd(_ time.Time) {
+	n.events = append(n.events, "OnAckEventEnd")
+}
+
+// TestSentPacketHandlerFullDispatchSequence verifies the complete 7-step call order
+// for a single ACK that triggers both packet loss and per-packet ack callbacks:
+//
+//  1. OnLossDetectionStart
+//  2. OnCongestionEvent (per lost packet)
+//  3. OnAckEventStart   (post-loss bytesInFlight)
+//  4. OnPacketAcked     (per acked packet)
+//  5. OnAckEventEnd
+func TestSentPacketHandlerFullDispatchSequence(t *testing.T) {
+	now := monotime.Now()
+	cong := &sequenceTrackingCongestion{}
+	cong.maxDatagramSize = 1200
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	// Send 4 packets. ACKing only packet 3 declares exactly packet 0 lost via
+	// reorder threshold (packets 1,2 are between 0 and 3, which equals threshold=3).
+	for i := range 4 {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+			[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+	}
+
+	cong.events = nil // clear setup noise
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: 3, Largest: 3}},
+	}, protocol.Encryption1RTT, now.Add(50*time.Millisecond))
+	require.NoError(t, err)
+
+	require.Equal(t, []string{
+		"OnLossDetectionStart",
+		"OnCongestionEvent",
+		"OnAckEventStart",
+		"OnPacketAcked",
+		"OnAckEventEnd",
+	}, cong.events)
+}
+
+// TestSentPacketHandlerCleanDispatchSequence verifies the dispatch sequence for a
+// clean ACK: no packet loss and no ECN congestion. The sequence is:
+//
+//  1. OnLossDetectionStart
+//  2. OnAckEventStart
+//  3. OnPacketAcked
+//  4. OnAckEventEnd
+//
+// OnCongestionEvent must not appear when nothing is lost and no CE marks arrive.
+func TestSentPacketHandlerCleanDispatchSequence(t *testing.T) {
+	now := monotime.Now()
+	cong := &sequenceTrackingCongestion{}
+	cong.maxDatagramSize = 1200
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		false,
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil,
+		[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECNNon, 1200, false, false)
+
+	cong.events = nil // clear setup noise
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
+	}, protocol.Encryption1RTT, now.Add(20*time.Millisecond))
+	require.NoError(t, err)
+
+	require.Equal(t, []string{
+		"OnLossDetectionStart",
+		"OnAckEventStart",
+		"OnPacketAcked",
+		"OnAckEventEnd",
+	}, cong.events)
+}
+
+// advanceECNToCapable sends and ACKs numECNTestingPackets packets with ECT0 marks
+// to bring the ecnTracker from ecnStateTesting to ecnStateCapable.
+// It mirrors the production code pattern where ECNMode is called before each send.
+func advanceECNToCapable(t *testing.T, sph SentPacketHandler, now monotime.Time) {
+	t.Helper()
+	handler := sph.(*sentPacketHandler)
+	for i := range numECNTestingPackets {
+		handler.ECNMode(true)
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+			[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+		_, err := sph.ReceivedAck(&wire.AckFrame{
+			AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
+			ECT0:      uint64(i + 1),
+		}, protocol.Encryption1RTT, now.Add(time.Duration(i)*time.Millisecond+20*time.Millisecond))
+		require.NoError(t, err)
+	}
+}
+
+// TestSentPacketHandlerECNOnlyWithECNCongestionHandlerDispatchSequence verifies the
+// dispatch sequence when a CE mark is received on an ECN-capable path and the
+// congestion controller implements ECNCongestionHandler. The sequence is:
+//
+//  1. OnLossDetectionStart
+//  2. OnECNCongestion  (ECNCongestionHandler path — no OnCongestionEvent)
+//  3. OnAckEventStart
+//  4. OnPacketAcked
+//  5. OnAckEventEnd
+func TestSentPacketHandlerECNOnlyWithECNCongestionHandlerDispatchSequence(t *testing.T) {
+	now := monotime.Now()
+	cong := &sequenceTrackingCongestion{}
+	cong.maxDatagramSize = 1200
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		true, // enableECN
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	advanceECNToCapable(t, sph, now)
+
+	// Reset state accumulated during the ECN testing phase.
+	cong.events = nil
+	cong.lossDetectionStarts = 0
+	cong.ackStartTimes = nil
+	cong.ackEndTimes = nil
+	cong.ecnAckedBytes = nil
+	cong.ecnECT0 = nil
+	cong.ecnCE = nil
+
+	// Send one packet and ACK it after the path is ECN-capable.
+	// OnECNCongestion fires unconditionally once IsECNCapable() is true.
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(100*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+		[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
+		ECT0:      uint64(numECNTestingPackets + 1),
+	}, protocol.Encryption1RTT, now.Add(120*time.Millisecond))
+	require.NoError(t, err)
+
+	require.Equal(t, []string{
+		"OnLossDetectionStart",
+		"OnECNCongestion",
+		"OnAckEventStart",
+		"OnPacketAcked",
+		"OnAckEventEnd",
+	}, cong.events)
+}
+
+// TestSentPacketHandlerECNOnlyNoECNCongestionHandlerDispatchSequence verifies the
+// dispatch sequence when a CE mark triggers congestion on an ECN-capable path but
+// the congestion controller does NOT implement ECNCongestionHandler. quic-go falls
+// back to OnCongestionEvent(lostBytes=0). The sequence is:
+//
+//  1. OnLossDetectionStart
+//  2. OnCongestionEvent  (ECN fallback, lostBytes=0)
+//  3. OnAckEventStart
+//  4. OnPacketAcked
+//  5. OnAckEventEnd
+func TestSentPacketHandlerECNOnlyNoECNCongestionHandlerDispatchSequence(t *testing.T) {
+	now := monotime.Now()
+	cong := &noECNSequenceTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		true, // enableECN
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	advanceECNToCapable(t, sph, now)
+
+	// Reset events accumulated during the ECN testing phase.
+	cong.events = nil
+
+	// Send one packet and ACK it with a CE mark. Because the controller does not
+	// implement ECNCongestionHandler, quic-go fires OnCongestionEvent(lostBytes=0).
+	pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+	sph.SentPacket(now.Add(100*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+		[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: pn, Largest: pn}},
+		ECT0:      uint64(numECNTestingPackets),
+		ECNCE:     1,
+	}, protocol.Encryption1RTT, now.Add(120*time.Millisecond))
+	require.NoError(t, err)
+
+	require.Equal(t, []string{
+		"OnLossDetectionStart",
+		"OnCongestionEvent",
+		"OnAckEventStart",
+		"OnPacketAcked",
+		"OnAckEventEnd",
+	}, cong.events)
+}
+
+// TestSentPacketHandlerLossAndECNNoECNCongestionHandlerDispatchSequence verifies the
+// dispatch sequence when both packet loss and a CE mark occur in the same ACK, and
+// the congestion controller does NOT implement ECNCongestionHandler. Both signals
+// produce separate OnCongestionEvent calls. The sequence is:
+//
+//  1. OnLossDetectionStart
+//  2. OnCongestionEvent  (loss-driven, lostBytes > 0)
+//  3. OnCongestionEvent  (ECN fallback, lostBytes=0)
+//  4. OnAckEventStart
+//  5. OnPacketAcked
+//  6. OnAckEventEnd
+func TestSentPacketHandlerLossAndECNNoECNCongestionHandlerDispatchSequence(t *testing.T) {
+	now := monotime.Now()
+	cong := &noECNSequenceTrackingCongestion{}
+	sph := NewSentPacketHandler(
+		0,
+		1200,
+		utils.NewRTTStats(),
+		&utils.ConnectionStats{},
+		false,
+		true, // enableECN
+		nil,
+		protocol.PerspectiveClient,
+		nil,
+		cong,
+		utils.DefaultLogger,
+	)
+
+	advanceECNToCapable(t, sph, now)
+
+	// Reset events accumulated during the ECN testing phase.
+	cong.events = nil
+
+	// Send 4 packets. ACKing only packet 3 (offset by testing packets) causes
+	// packet 0 to be declared lost via the reorder threshold.
+	base := sph.(*sentPacketHandler).appDataPackets.largestSent + 1
+	for i := range 4 {
+		pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+		sph.SentPacket(now.Add(100*time.Millisecond+time.Duration(i)*time.Millisecond), pn, protocol.InvalidPacketNumber, nil,
+			[]Frame{{Frame: &wire.PingFrame{}}}, protocol.Encryption1RTT, protocol.ECT0, 1200, false, false)
+	}
+	lastPn := base + 3
+
+	// ACK only the last packet with a CE mark. Packet base is declared lost
+	// (reorder threshold), and the CE triggers the ECN fallback congestion event.
+	_, err := sph.ReceivedAck(&wire.AckFrame{
+		AckRanges: []wire.AckRange{{Smallest: lastPn, Largest: lastPn}},
+		ECT0:      uint64(numECNTestingPackets),
+		ECNCE:     1,
+	}, protocol.Encryption1RTT, now.Add(200*time.Millisecond))
+	require.NoError(t, err)
+
+	require.Equal(t, []string{
+		"OnLossDetectionStart",
+		"OnCongestionEvent",
+		"OnCongestionEvent",
+		"OnAckEventStart",
+		"OnPacketAcked",
+		"OnAckEventEnd",
+	}, cong.events)
+}

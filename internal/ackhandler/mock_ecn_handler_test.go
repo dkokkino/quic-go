@@ -152,6 +152,44 @@ func (c *MockECNHandlerModeCall) DoAndReturn(f func() protocol.ECN) *MockECNHand
 	return c
 }
 
+// IsECNCapable mocks base method.
+func (m *MockECNHandler) IsECNCapable() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsECNCapable")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// IsECNCapable indicates an expected call of IsECNCapable.
+func (mr *MockECNHandlerMockRecorder) IsECNCapable() *MockECNHandlerIsECNCapableCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsECNCapable", reflect.TypeOf((*MockECNHandler)(nil).IsECNCapable))
+	return &MockECNHandlerIsECNCapableCall{Call: call}
+}
+
+// MockECNHandlerIsECNCapableCall wrap *gomock.Call
+type MockECNHandlerIsECNCapableCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockECNHandlerIsECNCapableCall) Return(arg0 bool) *MockECNHandlerIsECNCapableCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockECNHandlerIsECNCapableCall) Do(f func() bool) *MockECNHandlerIsECNCapableCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockECNHandlerIsECNCapableCall) DoAndReturn(f func() bool) *MockECNHandlerIsECNCapableCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // SentPacket mocks base method.
 func (m *MockECNHandler) SentPacket(arg0 protocol.PacketNumber, arg1 protocol.ECN) {
 	m.ctrl.T.Helper()

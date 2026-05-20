@@ -15,6 +15,36 @@ import (
 	"github.com/quic-go/quic-go/qlogwriter"
 )
 
+// ccAdapter is the monotime→time.Time seam. It wraps an external CongestionController
+// (time.Time boundary) and satisfies the internal SendAlgorithmWithDebugInfos
+// (monotime.Time). All monotime↔time.Time conversions are centralised here.
+// The no-op OnRetransmissionTimeout shields external implementations from a dead
+// internal method they should never need to implement.
+type ccAdapter struct {
+	cc congestion.CongestionController // time.Time boundary
+}
+
+func (a *ccAdapter) TimeUntilSend(b protocol.ByteCount) monotime.Time {
+	return monotime.FromTime(a.cc.TimeUntilSend(b))
+}
+func (a *ccAdapter) HasPacingBudget(now monotime.Time) bool { return a.cc.HasPacingBudget(now.ToTime()) }
+func (a *ccAdapter) CanSend(b protocol.ByteCount) bool      { return a.cc.CanSend(b) }
+func (a *ccAdapter) OnPacketSent(t monotime.Time, bif protocol.ByteCount, pn protocol.PacketNumber, b protocol.ByteCount, r bool) {
+	a.cc.OnPacketSent(t.ToTime(), bif, pn, b, r)
+}
+func (a *ccAdapter) OnPacketAcked(n protocol.PacketNumber, ab, pif protocol.ByteCount, t monotime.Time) {
+	a.cc.OnPacketAcked(n, ab, pif, t.ToTime())
+}
+func (a *ccAdapter) OnCongestionEvent(n protocol.PacketNumber, lb, pif protocol.ByteCount) {
+	a.cc.OnCongestionEvent(n, lb, pif)
+}
+func (a *ccAdapter) SetMaxDatagramSize(s protocol.ByteCount) { a.cc.SetMaxDatagramSize(s) }
+func (a *ccAdapter) MaybeExitSlowStart()                     { a.cc.MaybeExitSlowStart() }
+func (a *ccAdapter) OnRetransmissionTimeout(_ bool)          {}
+func (a *ccAdapter) InSlowStart() bool                       { return a.cc.InSlowStart() }
+func (a *ccAdapter) InRecovery() bool                        { return a.cc.InRecovery() }
+func (a *ccAdapter) GetCongestionWindow() protocol.ByteCount { return a.cc.GetCongestionWindow() }
+
 const (
 	// Maximum reordering in time space before time based loss detection considers a packet lost.
 	// Specified as an RTT multiplier.
@@ -90,8 +120,14 @@ type sentPacketHandler struct {
 	bytesInFlight protocol.ByteCount
 
 	congestion congestion.SendAlgorithmWithDebugInfos
-	rttStats   *utils.RTTStats
-	connStats  *utils.ConnectionStats
+	// customCC is the raw external controller (non-nil only when Config.Congestion was set).
+	// Optional interface dispatch type-asserts against this, not the ccAdapter wrapper.
+	customCC              congestion.CongestionController
+	// Keep the built-in default path on fresh controller instances, even if a
+	// future default controller type grows a migration hook.
+	usesDefaultCongestion bool
+	rttStats              *utils.RTTStats
+	connStats             *utils.ConnectionStats
 
 	// The number of times a PTO has been sent without receiving an ack.
 	ptoCount uint32
@@ -127,16 +163,30 @@ func NewSentPacketHandler(
 	ignorePacketsBelow func(protocol.PacketNumber),
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
+	customCC congestion.CongestionController,
 	logger utils.Logger,
 ) SentPacketHandler {
-	congestion := congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		rttStats,
-		connStats,
-		initialMaxDatagramSize,
-		true, // use Reno
-		qlogger,
-	)
+	var cc congestion.SendAlgorithmWithDebugInfos
+	usesDefault := false
+	if customCC == nil {
+		cc = congestion.NewCubicSender(
+			congestion.DefaultClock{},
+			rttStats,
+			connStats,
+			initialMaxDatagramSize,
+			true, // use Reno
+			qlogger,
+		)
+		usesDefault = true
+	} else {
+		// Inject RTT stats if the external CC opts in via SetRTTStats(RTTStatsReader).
+		type externalRTTStatsSetter interface{ SetRTTStats(utils.RTTStatsReader) }
+		if setter, ok := customCC.(externalRTTStatsSetter); ok {
+			setter.SetRTTStats(rttStats)
+		}
+		customCC.SetMaxDatagramSize(initialMaxDatagramSize)
+		cc = &ccAdapter{cc: customCC}
+	}
 
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
@@ -147,7 +197,9 @@ func NewSentPacketHandler(
 		lostPackets:                    *newLostPacketTracker(64),
 		rttStats:                       rttStats,
 		connStats:                      connStats,
-		congestion:                     congestion,
+		congestion:                     cc,
+		customCC:                       customCC,
+		usesDefaultCongestion:          usesDefault,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -400,6 +452,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	if err != nil || len(ackedPackets) == 0 {
 		return false, err
 	}
+	ackedInFlightBytes := ackedBytesInFlight(ackedPackets)
 	// update the RTT, if:
 	// * the largest acked is newly acknowledged, AND
 	// * at least one new ack-eliciting packet was acknowledged
@@ -421,19 +474,47 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		}
 	}
 
-	// Only inform the ECN tracker about new 1-RTT ACKs if the ACK increases the largest acked.
-	if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil && largestAcked > pnSpace.largestAcked {
-		congested := h.ecnTracker.HandleNewlyAcked(ackedPackets, int64(ack.ECT0), int64(ack.ECT1), int64(ack.ECNCE))
-		if congested {
-			h.congestion.OnCongestionEvent(largestAcked, 0, priorInFlight)
-		}
-	}
+	// Capture whether this ACK advances the largest acked before updating the field,
+	// so the ECN block below can use the same condition after loss detection has run.
+	isNewLargestAcked := encLevel == protocol.Encryption1RTT && largestAcked > pnSpace.largestAcked
 
 	pnSpace.largestAcked = max(pnSpace.largestAcked, largestAcked)
 
+	// Signal loss-detection start first so controllers can reset per-pass counters
+	// before any OnCongestionEvent calls (both packet-loss and ECN-driven) arrive.
+	if lossStart, ok := h.customCC.(congestion.LossDetectionHandler); ok {
+		lossStart.OnLossDetectionStart()
+	}
 	h.detectLostPackets(rcvTime, encLevel)
 	if encLevel == protocol.Encryption1RTT {
 		h.detectLostPathProbes(rcvTime)
+	}
+
+	// Process ECN details for new 1-RTT ACKs that increase the largest acked.
+	// Placed after loss detection so all congestion signals (loss and ECN) arrive
+	// after OnLossDetectionStart, giving controllers a consistent per-pass reset point.
+	if isNewLargestAcked {
+		if h.ecnTracker != nil {
+			congested := h.ecnTracker.HandleNewlyAcked(ackedPackets, int64(ack.ECT0), int64(ack.ECT1), int64(ack.ECNCE))
+			if ecnHandler, ok := h.customCC.(congestion.ECNCongestionHandler); ok {
+				if h.ecnTracker.IsECNCapable() {
+					ecnHandler.OnECNCongestion(
+						ackedInFlightBytes,
+						int64(ack.ECT0),
+						int64(ack.ECT1),
+						int64(ack.ECNCE),
+						priorInFlight,
+						rcvTime.ToTime(),
+					)
+				}
+			} else if congested {
+				h.congestion.OnCongestionEvent(largestAcked, 0, priorInFlight)
+			}
+		}
+	}
+
+	if ackEventStart, ok := h.customCC.(congestion.AckEventHandler); ok {
+		ackEventStart.OnAckEventStart(rcvTime.ToTime(), h.bytesInFlight)
 	}
 	var acked1RTTPacket bool
 	for _, p := range ackedPackets {
@@ -447,6 +528,9 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		if !p.isPathProbePacket {
 			putPacket(p.packet)
 		}
+	}
+	if ackEvents, ok := h.customCC.(congestion.AckEventHandler); ok {
+		ackEvents.OnAckEventEnd(rcvTime.ToTime())
 	}
 
 	// detect spurious losses for application data packets, if the ACK was not reordered
@@ -480,6 +564,16 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 
 	h.setLossDetectionTimer(rcvTime)
 	return acked1RTTPacket, nil
+}
+
+func ackedBytesInFlight(ackedPackets []packetWithPacketNumber) protocol.ByteCount {
+	var acked protocol.ByteCount
+	for _, p := range ackedPackets {
+		if p.includedInBytesInFlight {
+			acked += p.Length
+		}
+	}
+	return acked
 }
 
 func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime monotime.Time) {
@@ -519,6 +613,14 @@ func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime mon
 	}
 	for _, pn := range spuriousLosses {
 		h.lostPackets.Delete(pn)
+	}
+	if len(spuriousLosses) > 0 {
+		if slh, ok := h.customCC.(congestion.SpuriousLossHandler); ok {
+			for _, pn := range spuriousLosses {
+				packetReordering := h.appDataPackets.history.Difference(ack.LargestAcked(), pn)
+				slh.OnSpuriousLossDetected(pn, packetReordering)
+			}
+		}
 	}
 }
 
@@ -884,6 +986,9 @@ func (h *sentPacketHandler) OnLossDetectionTimeout(now monotime.Time) error {
 			})
 		}
 		// Early retransmit or time loss detection
+		if lossStart, ok := h.customCC.(congestion.LossDetectionHandler); ok {
+			lossStart.OnLossDetectionStart()
+		}
 		h.detectLostPackets(now, encLevel)
 		return nil
 	}
@@ -925,6 +1030,9 @@ func (h *sentPacketHandler) OnLossDetectionTimeout(now monotime.Time) error {
 			EncLevel:  encLevel,
 		})
 		h.qlogger.RecordEvent(qlog.PTOCountUpdated{PTOCount: h.ptoCount})
+	}
+	if timeoutHandler, ok := h.customCC.(congestion.PTOHandler); ok && h.bytesInFlight > 0 {
+		timeoutHandler.OnPTO(h.bytesInFlight)
 	}
 	h.numProbesToSend += 2
 	//nolint:exhaustive // We never arm a PTO timer for 0-RTT packets.
@@ -1131,6 +1239,16 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	for pn := range h.appDataPackets.history.PathProbes() {
 		h.appDataPackets.history.RemovePathProbe(pn)
 	}
+	// RFC 9000 §9.4: the congestion controller MUST be reset to initial values on
+	// path migration. Custom CCs that implement ConnectionMigrationHandler reset
+	// themselves in place; all others are replaced with a fresh NewReno instance.
+	if !h.usesDefaultCongestion {
+		if migrator, ok := h.customCC.(congestion.ConnectionMigrationHandler); ok {
+			migrator.OnConnectionMigration(initialMaxDatagramSize)
+			h.setLossDetectionTimer(now)
+			return
+		}
+	}
 	h.congestion = congestion.NewCubicSender(
 		congestion.DefaultClock{},
 		h.rttStats,
@@ -1140,4 +1258,10 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 		h.qlogger,
 	)
 	h.setLossDetectionTimer(now)
+}
+
+func (h *sentPacketHandler) MarkAppLimited() {
+	if marker, ok := h.customCC.(congestion.AppLimitedHandler); ok {
+		marker.MarkAppLimited(h.bytesInFlight)
+	}
 }

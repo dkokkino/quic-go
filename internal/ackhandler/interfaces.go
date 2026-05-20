@@ -36,4 +36,9 @@ type SentPacketHandler interface {
 	OnLossDetectionTimeout(now monotime.Time) error
 
 	MigratedPath(now monotime.Time, initialMaxPacketSize protocol.ByteCount)
+
+	// MarkAppLimited signals that the sender is application-limited — the congestion
+	// window allows sending but no data is available. No-op for the default NewReno path;
+	// forwarded to the external CC if it implements AppLimitedHandler.
+	MarkAppLimited()
 }
